@@ -1,0 +1,6 @@
+# Build output (ship it as a GitHub release asset instead)
+*.exe
+*.pdb
+
+# Local shortcuts
+*.lnk
