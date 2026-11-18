@@ -60,7 +60,7 @@ class TrayApp : ApplicationContext
 {
     readonly NotifyIcon tray = new NotifyIcon();
     readonly ContextMenuStrip menu = new ContextMenuStrip();
-    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, ancMenu, sidetoneMenu, screenMenu, enabledItem, popupItem, notifyItem, startupItem;
+    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, ancMenu, sidetoneMenu, screenMenu, eqMenu, enabledItem, popupItem, notifyItem, startupItem;
     static readonly string[] Durations = { "Never", "1 minute", "5 minutes", "10 minutes", "15 minutes", "30 minutes", "60 minutes" };
     readonly MixPopup popup = new MixPopup();
     bool firstMix = true;
@@ -75,6 +75,7 @@ class TrayApp : ApplicationContext
 
     int game = 100, chat = 100;
     HeadsetStatus status;
+    EqSnapshot eqSnapshot;
     IntPtr iconHandle;
 
     public TrayApp()
@@ -100,6 +101,8 @@ class TrayApp : ApplicationContext
         sidetoneMenu.DropDownOpening += (s, e) => BuildSidetoneMenu();
         screenMenu = new ToolStripMenuItem("Screen") { Visible = false };
         screenMenu.DropDownOpening += (s, e) => BuildScreenMenu();
+        eqMenu = new ToolStripMenuItem("Onboard EQ") { Visible = false };
+        eqMenu.DropDownOpening += (s, e) => { hid.RequestEq(); BuildEqMenu(); };
 
         enabledItem = new ToolStripMenuItem("Mix enabled") { Checked = true, CheckOnClick = true };
         enabledItem.CheckedChanged += (s, e) => { if (!enabledItem.Checked) mixer.Restore(); Apply(); };
@@ -119,7 +122,7 @@ class TrayApp : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[] {
             mixLabel, headsetLabel, deviceLabel, new ToolStripSeparator(),
-            chatAppsMenu, mediaAppsMenu, ancMenu, sidetoneMenu, screenMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
+            chatAppsMenu, mediaAppsMenu, ancMenu, sidetoneMenu, screenMenu, eqMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (s, e) => ExitThread())
         });
         tray.ContextMenuStrip = menu;
@@ -134,6 +137,7 @@ class TrayApp : ApplicationContext
             firstMix = false;
         };
         hid.StatusChanged += OnStatus;
+        hid.EqChanged += snap => { eqSnapshot = snap; if (eqMenu.DropDown.Visible) BuildEqMenu(); };
         hid.Start();
 
         connectedTimer.Tick += (s, e) =>
@@ -171,6 +175,7 @@ class TrayApp : ApplicationContext
         {
             connectedTimer.Stop();
             connectedTimer.Start();
+            if (st.Elite) hid.RequestEq();
         }
         else if (!st.Online && prev.Online)
         {
@@ -210,7 +215,7 @@ class TrayApp : ApplicationContext
         mixLabel.Text = string.Format("Game {0}%  ·  Chat {1}%  ·  Media full", game, chat);
         headsetLabel.Text = HeadsetLine();
         bool elite = status.Elite && status.Known;
-        ancMenu.Visible = sidetoneMenu.Visible = screenMenu.Visible = elite;
+        ancMenu.Visible = sidetoneMenu.Visible = screenMenu.Visible = eqMenu.Visible = elite;
         deviceLabel.Text = mixer.DeviceName != null ? "Output: " + mixer.DeviceName : "Output: Arctis audio device not found";
 
         string tip = string.Format("MixDial  ·  Game {0}%  ·  Chat {1}%", game, chat);
@@ -286,6 +291,52 @@ class TrayApp : ApplicationContext
         var autoOff = new ToolStripMenuItem("Headset off after");
         FillChoices(autoOff, Durations, status.AutoOffKnown, status.AutoOff, n => hid.SendElite(0xC1, (byte)n));
         screenMenu.DropDownItems.AddRange(new ToolStripItem[] { brightness, dim, dimAfter, autoOff });
+    }
+
+    void BuildEqMenu()
+    {
+        eqMenu.DropDownItems.Clear();
+        if (eqSnapshot == null)
+        {
+            eqMenu.DropDownItems.Add(new ToolStripMenuItem("Reading the headset…") { Enabled = false });
+            return;
+        }
+        eqMenu.DropDownItems.Add(CurveMenu("Wireless", eqSnapshot.WirelessPreset, eqSnapshot.Wireless));
+        var measured = eqSnapshot.MeasuredDiffers ? CurveMenu("Measured", -1, eqSnapshot.Measured) : null;
+        eqMenu.DropDownItems.Add(GainsMenu("Microphone", eqSnapshot.MicPreset, eqSnapshot.MicGains));
+        eqMenu.DropDownItems.Add(GainsMenu("Bluetooth", eqSnapshot.BtPreset, eqSnapshot.BtGains));
+        if (measured != null) eqMenu.DropDownItems.Add(measured);
+    }
+
+    static ToolStripMenuItem CurveMenu(string title, int preset, EqBand[] bands)
+    {
+        var menu = new ToolStripMenuItem(preset >= 0 ? title + "  ·  preset " + preset : title);
+        if (bands == null)
+        {
+            menu.DropDownItems.Add(new ToolStripMenuItem("No curve") { Enabled = false });
+            return menu;
+        }
+        foreach (var band in bands)
+            menu.DropDownItems.Add(new ToolStripMenuItem(band.Describe()) { Enabled = false });
+        return menu;
+    }
+
+    static ToolStripMenuItem GainsMenu(string title, int preset, int[] tenths)
+    {
+        var menu = new ToolStripMenuItem(title + "  ·  preset " + preset);
+        if (tenths == null)
+        {
+            menu.DropDownItems.Add(new ToolStripMenuItem("No curve") { Enabled = false });
+            return menu;
+        }
+        bool flat = true;
+        for (int i = 0; i < tenths.Length; i++) if (tenths[i] != tenths[0]) flat = false;
+        if (flat)
+            menu.DropDownItems.Add(new ToolStripMenuItem("All bands " + EqBand.Db(tenths[0])) { Enabled = false });
+        else
+            for (int i = 0; i < tenths.Length; i++)
+                menu.DropDownItems.Add(new ToolStripMenuItem("Band " + (i + 1) + "  " + EqBand.Db(tenths[i])) { Enabled = false });
+        return menu;
     }
 
     static void FillRange(ToolStripMenuItem menu, int first, int last, bool known, int selected, Action<int> choose, string prefix)
@@ -915,6 +966,94 @@ struct HeadsetStatus
     public int Battery, BatteryMax, DockBattery, AncMode, SidetoneLevel, Brightness, DimTimer, DimMode, AutoOff;
 }
 
+class EqBand
+{
+    public int Frequency, Filter, GainTenths, QThousandths;
+
+    public string Describe()
+    {
+        return Frequency + " Hz  ·  " + FilterName(Filter) + "  ·  " + Db(GainTenths) + "  ·  Q " + (QThousandths / 1000.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    public static string Db(int tenths)
+    {
+        return (tenths / 10.0).ToString("+0.0;-0.0;0.0", System.Globalization.CultureInfo.InvariantCulture) + " dB";
+    }
+
+    static string FilterName(int type)
+    {
+        switch (type)
+        {
+            case 1: return "peak";
+            case 2: return "low pass";
+            case 3: return "high pass";
+            case 4: return "low shelf";
+            case 5: return "high shelf";
+            default: return "type " + type;
+        }
+    }
+}
+
+class EqSnapshot
+{
+    public EqBand[] Wireless, Measured;
+    public int[] MicGains, BtGains;
+    public int WirelessPreset, MicPreset, BtPreset;
+    public bool MeasuredDiffers;
+
+    public static EqSnapshot Parse(byte[] buf)
+    {
+        if (buf == null || buf.Length < 161) return null;
+        int o = buf[0] == 0x01 && buf[1] == 0x20 ? 1 : buf[0] == 0x20 ? 0 : -1;
+        if (o < 0 || buf.Length < o + 161) return null;
+        var wireless = ReadBands(buf, o + 1);
+        var measured = ReadBands(buf, o + 61);
+        if (wireless == null) return null;
+        return new EqSnapshot
+        {
+            Wireless = wireless,
+            Measured = measured,
+            MeasuredDiffers = measured != null && Differs(wireless, measured),
+            BtGains = ReadGains(buf, o + 121),
+            MicGains = ReadGains(buf, o + 131),
+            WirelessPreset = buf[o + 148],
+            MicPreset = buf[o + 149],
+            BtPreset = buf[o + 150]
+        };
+    }
+
+    static bool Differs(EqBand[] a, EqBand[] b)
+    {
+        for (int i = 0; i < a.Length; i++)
+            if (a[i].Frequency != b[i].Frequency || a[i].Filter != b[i].Filter || a[i].GainTenths != b[i].GainTenths || a[i].QThousandths != b[i].QThousandths)
+                return true;
+        return false;
+    }
+
+    static EqBand[] ReadBands(byte[] buf, int start)
+    {
+        var bands = new EqBand[10];
+        int plausible = 0;
+        for (int i = 0; i < 10; i++)
+        {
+            int p = start + i * 6;
+            if (p + 6 > buf.Length) return null;
+            int freq = buf[p] | (buf[p + 1] << 8);
+            int q = buf[p + 4] | (buf[p + 5] << 8);
+            if (freq >= 20 && freq <= 20000) plausible++;
+            bands[i] = new EqBand { Frequency = freq, Filter = buf[p + 2], GainTenths = (sbyte)buf[p + 3], QThousandths = q };
+        }
+        return plausible >= 8 ? bands : null;
+    }
+
+    static int[] ReadGains(byte[] buf, int start)
+    {
+        var gains = new int[10];
+        for (int i = 0; i < 10; i++) gains[i] = (sbyte)buf[start + i];
+        return gains;
+    }
+}
+
 enum DialProtocol { Arctis7Plus, NovaElite }
 
 class HeadsetModel
@@ -933,11 +1072,12 @@ class ArctisHid
 
     public event Action<int, int> MixChanged;
     public event Action<HeadsetStatus> StatusChanged;
+    public event Action<EqSnapshot> EqChanged;
 
     readonly SynchronizationContext ui;
     readonly object statusLock = new object();
     readonly Queue<byte[]> outbound = new Queue<byte[]>();
-    volatile bool deviceLost, requestStatus, stopping, rearmChatMix;
+    volatile bool deviceLost, requestStatus, stopping, rearmChatMix, wantEq;
     volatile string eliteCommandPath;
     int eliteOutLen = 64;
     DialProtocol protocol;
@@ -959,6 +1099,8 @@ class ArctisHid
         Buffer.BlockCopy(payload, 0, item, 1, payload.Length);
         lock (outbound) outbound.Enqueue(item);
     }
+
+    public void RequestEq() { wantEq = true; }
 
     public void Shutdown()
     {
@@ -990,11 +1132,11 @@ class ArctisHid
     {
         string statusPath = null, eventPath = null;
         HeadsetModel model = null;
-        int outLen = 64, commandReportIn = 64, eventReportIn = 64;
+        int outLen = 64, commandReportIn = 64, eventReportIn = 64, featureLen = 1036;
         foreach (var candidate in Models)
         {
             string command = null, events = null;
-            int length = 64, commandIn = 64, eventIn = 64;
+            int length = 64, commandIn = 64, eventIn = 64, feature = 1036;
             foreach (var dev in Hid.Enumerate(VendorId, candidate.ProductIds))
             {
                 if (dev.UsagePage == 0xFFC0)
@@ -1002,6 +1144,7 @@ class ArctisHid
                     command = dev.Path;
                     if (dev.OutputLength >= 64) length = dev.OutputLength;
                     if (dev.InputLength >= 64) commandIn = dev.InputLength;
+                    if (dev.FeatureLength >= 64) feature = dev.FeatureLength;
                 }
                 else if (dev.UsagePage == 0xFF00)
                 {
@@ -1016,6 +1159,7 @@ class ArctisHid
             outLen = length;
             commandReportIn = commandIn;
             eventReportIn = eventIn;
+            featureLen = feature;
             break;
         }
         if (statusPath == null) return;
@@ -1060,6 +1204,17 @@ class ArctisHid
                         writer.Write(EliteCommand(reportLength, 0x49, 0x01), 0, reportLength);
                     }
                     if (protocol == DialProtocol.NovaElite) DrainOutbound(writer, reportLength);
+                    if (wantEq && protocol == DialProtocol.NovaElite)
+                    {
+                        wantEq = false;
+                        try
+                        {
+                            writer.Write(EliteCommand(reportLength, 0x20, 0), 0, reportLength);
+                            var snap = EqSnapshot.Parse(Hid.GetFeature(statusPath, featureLen));
+                            if (snap != null) PublishEq(snap);
+                        }
+                        catch (Exception) { }
+                    }
                     Thread.Sleep(100);
                 }
                 if (stopping && protocol == DialProtocol.NovaElite)
@@ -1283,11 +1438,16 @@ class ArctisHid
         lock (statusLock) lastStatus = status;
         ui.Post(_ => { if (StatusChanged != null) StatusChanged(status); }, null);
     }
+
+    void PublishEq(EqSnapshot snapshot)
+    {
+        ui.Post(_ => { if (EqChanged != null) EqChanged(snapshot); }, null);
+    }
 }
 
 static class Hid
 {
-    public class DeviceInfo { public string Path; public ushort UsagePage, Usage, InputLength, OutputLength; }
+    public class DeviceInfo { public string Path; public ushort UsagePage, Usage, InputLength, OutputLength, FeatureLength; }
 
     public static List<DeviceInfo> Enumerate(ushort vid, ushort[] pids)
     {
@@ -1324,7 +1484,7 @@ static class Hid
                     HIDP_CAPS caps;
                     HidP_GetCaps(preparsed, out caps);
                     HidD_FreePreparsedData(preparsed);
-                    result.Add(new DeviceInfo { Path = path, UsagePage = caps.UsagePage, Usage = caps.Usage, InputLength = caps.InputReportByteLength, OutputLength = caps.OutputReportByteLength });
+                    result.Add(new DeviceInfo { Path = path, UsagePage = caps.UsagePage, Usage = caps.Usage, InputLength = caps.InputReportByteLength, OutputLength = caps.OutputReportByteLength, FeatureLength = caps.FeatureReportByteLength });
                 }
             }
         }
@@ -1353,7 +1513,21 @@ static class Hid
             NumberFeatureButtonCaps, NumberFeatureValueCaps, NumberFeatureDataIndices;
     }
 
+    public static byte[] GetFeature(string path, int length)
+    {
+        if (length < 16 || length > 4096) length = 1036;
+        using (var h = CreateFile(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero))
+        {
+            if (h.IsInvalid) return null;
+            var buf = new byte[length];
+            buf[0] = 0x01;
+            if (!HidD_GetFeature(h, buf, buf.Length)) return null;
+            return buf;
+        }
+    }
+
     [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid guid);
+    [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buf, int length);
     [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr data);
     [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr data);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr data, out HIDP_CAPS caps);

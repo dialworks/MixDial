@@ -68,8 +68,8 @@ That's it. Turn the dial.
 On the Nova Elite the wheel is a volume knob until ChatMix is switched on. MixDial turns ChatMix on
 while it is running and turns it off again when you quit. Press the wheel once if it is still changing
 the system volume — that toggles the wheel between volume and the mix. The tray shows mic mute and an
-**ANC**, **Sidetone**, and **Screen** menus only while a Nova Elite is connected. An Arctis 7+ does not
-get those menus. Sidetone here is the boom mic. Screen covers brightness, dim, and auto-off.
+**ANC**, **Sidetone**, **Screen**, and **Onboard EQ** appear only while a Nova Elite is connected.
+An Arctis 7+ does not get those menus. Onboard EQ in this change only reads the curves.
 
 Have a different model? Other headsets use a different protocol, so they aren't supported yet —
 [open an issue](https://github.com/dialworks/MixDial/issues) or send a pull request.
