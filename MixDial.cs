@@ -1,9 +1,10 @@
-// MixDial - makes the hardware game/chat mix dial on SteelSeries Arctis 7+ family headsets work without
-// SteelSeries GG. Unofficial; not affiliated with or endorsed by SteelSeries.
+// MixDial - makes the hardware game/chat mix dial on SteelSeries Arctis 7+ and Arctis Nova Elite
+// headsets work without SteelSeries GG. Unofficial; not affiliated with or endorsed by SteelSeries.
 //
 // The dongle reports the dial as two levels (game 0-100, chat 0-100). Windows only exposes a single
 // output device for the headset, so the mix is applied per application: apps on the chat list follow
-// the chat level, every other app playing on the headset follows the game level.
+// the chat level, apps on the media list stay at full volume, and every other app follows the game
+// level. An app on both lists follows chat. This split is done in Windows and applies to every headset.
 
 using System;
 using System.Collections.Generic;
@@ -21,7 +22,7 @@ using Microsoft.Win32.SafeHandles;
 
 [assembly: AssemblyTitle("MixDial")]
 [assembly: AssemblyProduct("MixDial")]
-[assembly: AssemblyDescription("Game/chat mix dial for SteelSeries Arctis 7+ headsets (unofficial)")]
+[assembly: AssemblyDescription("Game/chat mix dial for SteelSeries Arctis 7+ and Nova Elite headsets (unofficial)")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 dialworks. MIT License.")]
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
@@ -59,7 +60,7 @@ class TrayApp : ApplicationContext
 {
     readonly NotifyIcon tray = new NotifyIcon();
     readonly ContextMenuStrip menu = new ContextMenuStrip();
-    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, enabledItem, popupItem, notifyItem, startupItem;
+    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, enabledItem, popupItem, notifyItem, startupItem;
     readonly MixPopup popup = new MixPopup();
     bool firstMix = true;
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 500 };
@@ -67,7 +68,8 @@ class TrayApp : ApplicationContext
     readonly System.Windows.Forms.Timer connectedTimer = new System.Windows.Forms.Timer { Interval = 1500 };
     bool firstStatus = true;
     readonly AudioMixer mixer = new AudioMixer();
-    readonly ChatAppList chatApps = new ChatAppList();
+    readonly AppNameList chatApps = new AppNameList("chat-apps.txt", AppNameList.ChatDefaults);
+    readonly AppNameList mediaApps = new AppNameList("media-apps.txt", AppNameList.MediaDefaults);
     readonly ArctisHid hid;
 
     int game = 100, chat = 100;
@@ -85,7 +87,11 @@ class TrayApp : ApplicationContext
 
         chatAppsMenu = new ToolStripMenuItem("Chat apps");
         chatAppsMenu.DropDownItems.Add("...");
-        chatAppsMenu.DropDownOpening += (s, e) => BuildChatAppsMenu();
+        chatAppsMenu.DropDownOpening += (s, e) => BuildAppMenu(chatAppsMenu, chatApps, "checked = chat", "Edit chat app list...");
+
+        mediaAppsMenu = new ToolStripMenuItem("Media apps");
+        mediaAppsMenu.DropDownItems.Add("...");
+        mediaAppsMenu.DropDownOpening += (s, e) => BuildAppMenu(mediaAppsMenu, mediaApps, "checked = full volume", "Edit media app list...");
 
         enabledItem = new ToolStripMenuItem("Mix enabled") { Checked = true, CheckOnClick = true };
         enabledItem.CheckedChanged += (s, e) => { if (!enabledItem.Checked) mixer.Restore(); Apply(); };
@@ -105,7 +111,7 @@ class TrayApp : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[] {
             mixLabel, headsetLabel, deviceLabel, new ToolStripSeparator(),
-            chatAppsMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
+            chatAppsMenu, mediaAppsMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (s, e) => ExitThread())
         });
         tray.ContextMenuStrip = menu;
@@ -125,7 +131,7 @@ class TrayApp : ApplicationContext
         connectedTimer.Tick += (s, e) =>
         {
             connectedTimer.Stop();
-            if (status.Battery <= 1) Notify("Headset connected", "Battery low: " + BatteryText, ToolTipIcon.Warning);
+            if (BatteryIsLow) Notify("Headset connected", "Battery low: " + BatteryText, ToolTipIcon.Warning);
             else Notify("Headset connected", "Battery " + BatteryText, ToolTipIcon.Info);
         };
 
@@ -138,8 +144,9 @@ class TrayApp : ApplicationContext
     void Apply()
     {
         chatApps.ReloadIfChanged();
+        mediaApps.ReloadIfChanged();
         if (enabledItem.Checked)
-            mixer.Apply(game / 100f, chat / 100f, chatApps.Contains);
+            mixer.Apply(game / 100f, chat / 100f, chatApps.Contains, mediaApps.Contains);
         else
             mixer.Sessions(); // keeps the device lookup current for the menu
         RefreshUi();
@@ -162,14 +169,28 @@ class TrayApp : ApplicationContext
             if (connectedTimer.Enabled) connectedTimer.Stop(); // connected and dropped again: say nothing
             else Notify("Headset disconnected", st.Known ? "Turned off or out of range" : "Dongle unplugged", ToolTipIcon.Info);
         }
-        else if (st.Online && prev.Online && st.Battery < prev.Battery && st.Battery <= 1 && !connectedTimer.Enabled)
+        else if (st.Online && prev.Online && st.Battery < prev.Battery && BatteryIsLow && !connectedTimer.Enabled)
         {
             Notify(st.Battery == 0 ? "Battery almost empty" : "Battery low", "Battery " + BatteryText + " - time to charge", ToolTipIcon.Warning);
         }
     }
 
-    // The headset only reports 5 battery steps (0-4), so show it as such rather than a fake percentage.
-    string BatteryText { get { return status.Battery + "/4"; } }
+    // Arctis 7+ reports five steps (0-4). Nova Elite reports a percentage, plus the spare battery in the base.
+    string BatteryText
+    {
+        get
+        {
+            if (status.BatteryMax >= 100)
+            {
+                string text = status.Battery + "%";
+                if (status.HasDockBattery) text += "  ·  spare " + status.DockBattery + "%";
+                return text;
+            }
+            return status.Battery + "/4";
+        }
+    }
+
+    bool BatteryIsLow { get { return status.BatteryMax >= 100 ? status.Battery <= 20 : status.Battery <= 1; } }
 
     void Notify(string title, string text, ToolTipIcon icon)
     {
@@ -178,7 +199,7 @@ class TrayApp : ApplicationContext
 
     void RefreshUi()
     {
-        mixLabel.Text = string.Format("Game {0}%  ·  Chat {1}%", game, chat);
+        mixLabel.Text = string.Format("Game {0}%  ·  Chat {1}%  ·  Media full", game, chat);
         headsetLabel.Text = !status.Known ? "Headset: looking for dongle..."
             : !status.Online ? "Headset: off / out of range"
             : string.Format("Headset: on  ·  battery {0}{1}", BatteryText, status.Charging ? " (charging)" : "");
@@ -191,26 +212,25 @@ class TrayApp : ApplicationContext
         UpdateIcon();
     }
 
-    void BuildChatAppsMenu()
+    void BuildAppMenu(ToolStripMenuItem menu, AppNameList list, string checkedMeans, string editLabel)
     {
-        chatAppsMenu.DropDownItems.Clear();
+        menu.DropDownItems.Clear();
         var running = mixer.Sessions().Select(s => s.Name).Where(n => n != AudioMixer.SystemSoundsName)
             .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
 
-        var header = new ToolStripMenuItem("Apps playing on the headset (checked = chat):") { Enabled = false };
-        chatAppsMenu.DropDownItems.Add(header);
+        menu.DropDownItems.Add(new ToolStripMenuItem("Apps playing on the headset (" + checkedMeans + "):") { Enabled = false });
         if (running.Count == 0)
-            chatAppsMenu.DropDownItems.Add(new ToolStripMenuItem("(none right now)") { Enabled = false });
+            menu.DropDownItems.Add(new ToolStripMenuItem("(none right now)") { Enabled = false });
         foreach (var name in running)
         {
             var app = name;
-            var item = new ToolStripMenuItem(app) { Checked = chatApps.Contains(app) };
-            item.Click += (s, e) => { chatApps.Toggle(app); Apply(); };
-            chatAppsMenu.DropDownItems.Add(item);
+            var item = new ToolStripMenuItem(app) { Checked = list.Contains(app) };
+            item.Click += (s, e) => { list.Toggle(app); Apply(); };
+            menu.DropDownItems.Add(item);
         }
-        chatAppsMenu.DropDownItems.Add(new ToolStripSeparator());
-        chatAppsMenu.DropDownItems.Add(new ToolStripMenuItem("Edit chat app list...", null,
-            (s, e) => Process.Start("notepad.exe", "\"" + chatApps.FilePath + "\"")));
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(new ToolStripMenuItem(editLabel, null,
+            (s, e) => Process.Start("notepad.exe", "\"" + list.FilePath + "\"")));
     }
 
     void UpdateIcon()
@@ -246,6 +266,7 @@ class TrayApp : ApplicationContext
     protected override void ExitThreadCore()
     {
         timer.Stop();
+        if (hid != null) hid.Shutdown();
         mixer.Restore();
         popup.Dispose();
         tray.Visible = false;
@@ -257,15 +278,15 @@ class TrayApp : ApplicationContext
 }
 
 // ---------------------------------------------------------------------------------------------
-// Chat app list (one process name per line in %APPDATA%\MixDial\chat-apps.txt)
+// App lists (one process name per line in %APPDATA%\MixDial\)
 // ---------------------------------------------------------------------------------------------
 
-class ChatAppList
+class AppNameList
 {
-    const string Defaults =
+    public const string ChatDefaults =
 @"# MixDial chat apps
 # One process name per line (with or without .exe). Lines starting with # are ignored.
-# These apps follow the CHAT side of the dial; every other app follows the GAME side.
+# These apps follow the CHAT side of the dial. Chat wins over the media list.
 Discord
 DiscordPTB
 DiscordCanary
@@ -283,18 +304,36 @@ WhatsApp
 Telegram
 ";
 
-    public readonly string FilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MixDial", "chat-apps.txt");
+    public const string MediaDefaults =
+@"# MixDial media apps
+# One process name per line (with or without .exe). Lines starting with # are ignored.
+# These apps stay at full volume on every supported headset. Chat wins if an app is on both lists.
+firefox
+chrome
+msedge
+brave
+opera
+spotify
+vlc
+mpv
+wmplayer
+Music.UI
+foobar2000
+MusicBee
+iTunes
+";
 
+    public readonly string FilePath;
     HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     DateTime loadedStamp;
 
-    public ChatAppList()
+    public AppNameList(string fileName, string defaults)
     {
+        FilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MixDial", fileName);
         if (!File.Exists(FilePath))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
-            File.WriteAllText(FilePath, Defaults);
+            File.WriteAllText(FilePath, defaults);
         }
         ReloadIfChanged();
     }
@@ -599,11 +638,11 @@ class AudioMixer
         return name;
     }
 
-    public void Apply(float game, float chat, Func<string, bool> isChat)
+    public void Apply(float game, float chat, Func<string, bool> isChat, Func<string, bool> isMedia)
     {
         foreach (var s in Sessions())
         {
-            float target = isChat(s.Name) ? chat : game;
+            float target = isChat(s.Name) ? chat : isMedia(s.Name) ? 1f : game;
             if (SetVolume(s, target)) touched.Add(s.Id);
         }
     }
@@ -752,33 +791,54 @@ interface IAudioSessionNotification
 }
 
 // ---------------------------------------------------------------------------------------------
-// Dongle protocol (USB HID)
+// Dongle protocol (USB HID). Both families use usage page 0xFFC0 to send and 0xFF00 to receive.
 //
-//   vendor interface, usage page 0xFF00: pushes  [00] 45 <game> <chat>  whenever the dial moves
-//                                        pushes  [00] BB <03 connected / 00 off>  on connection changes
-//                                        pushes  [00] B7 <battery 0-4>  when the battery level changes
-//   vendor interface, usage page 0xFFC0: request [00] B0  ->  [00] B0 <online 03 / off 01> <battery 0-4>
-//                                                              <charging 01> <game> <chat>
+// Arctis 7+ family, report id 0x00:
+//   pushes  [00] 45 <game> <chat>                 dial moved (0-100 each)
+//   pushes  [00] BB <03 connected / 00 off>       connection change
+//   pushes  [00] B7 <battery 0-4>                 battery changed
+//   request [00] B0 -> [00] B0 <online 03 / off 01> <battery 0-4> <charging 01> <game> <chat>
+//
+// Arctis Nova Elite, report id 0x01 out / 0x07 in:
+//   write   [01] 49 <01 on / 00 off>              software ChatMix; the dial emits 45 only while this is on
+//   write   [01] B0                               status query
+//   answer  [01] B0 .. headset % at byte 6, spare % at byte 7, radio at byte 14 (08 = online), charging at byte 15 (02 = charging)
+//   pushes  [07] 45 <game> <chat>
+//   pushes  [07] B7 <headset %> <spare %> <charging>
+//   pushes  [07] B5 .. <radio at byte 4>
 // ---------------------------------------------------------------------------------------------
 
 struct HeadsetStatus
 {
-    public bool Known, Online, Charging;
-    public int Battery;
+    public bool Known, Online, Charging, HasDockBattery;
+    public int Battery, BatteryMax, DockBattery;
+}
+
+enum DialProtocol { Arctis7Plus, NovaElite }
+
+class HeadsetModel
+{
+    public DialProtocol Protocol;
+    public ushort[] ProductIds;
 }
 
 class ArctisHid
 {
     const ushort VendorId = 0x1038;
-    // Arctis 7+, 7P+, 7X+, 7+ Destiny edition
-    static readonly ushort[] ProductIds = { 0x220E, 0x2212, 0x2216, 0x2236 };
+    static readonly HeadsetModel[] Models = {
+        new HeadsetModel { Protocol = DialProtocol.Arctis7Plus, ProductIds = new ushort[] { 0x220E, 0x2212, 0x2216, 0x2236 } },
+        new HeadsetModel { Protocol = DialProtocol.NovaElite, ProductIds = new ushort[] { 0x2244, 0x2270 } },
+    };
 
     public event Action<int, int> MixChanged;
     public event Action<HeadsetStatus> StatusChanged;
 
     readonly SynchronizationContext ui;
     readonly object statusLock = new object();
-    volatile bool deviceLost, requestStatus;
+    volatile bool deviceLost, requestStatus, stopping, rearmChatMix;
+    volatile string eliteCommandPath;
+    int eliteOutLen = 64;
+    DialProtocol protocol;
     HeadsetStatus lastStatus;
     int lastGame = -1, lastChat = -1;
 
@@ -789,12 +849,28 @@ class ArctisHid
         new Thread(Run) { IsBackground = true, Name = "Arctis HID" }.Start();
     }
 
+    public void Shutdown()
+    {
+        string path = eliteCommandPath;
+        int length = eliteOutLen;
+        stopping = true;
+        deviceLost = true;
+        if (path == null || length < 64) return;
+        try
+        {
+            using (var writer = Hid.Open(path, length))
+                writer.Write(EliteCommand(length, 0x49, 0x00), 0, length);
+        }
+        catch (Exception) { }
+    }
+
     void Run()
     {
-        while (true)
+        while (!stopping)
         {
             try { RunSession(); } catch (Exception) { }
             if (lastStatus.Known) Publish(new HeadsetStatus());
+            if (stopping) break;
             Thread.Sleep(2000);
         }
     }
@@ -802,50 +878,107 @@ class ArctisHid
     void RunSession()
     {
         string statusPath = null, eventPath = null;
-        foreach (var dev in Hid.Enumerate(VendorId, ProductIds))
+        HeadsetModel model = null;
+        int outLen = 64, commandReportIn = 64, eventReportIn = 64;
+        foreach (var candidate in Models)
         {
-            if (dev.UsagePage == 0xFFC0) statusPath = dev.Path;
-            else if (dev.UsagePage == 0xFF00) eventPath = dev.Path;
+            string command = null, events = null;
+            int length = 64, commandIn = 64, eventIn = 64;
+            foreach (var dev in Hid.Enumerate(VendorId, candidate.ProductIds))
+            {
+                if (dev.UsagePage == 0xFFC0)
+                {
+                    command = dev.Path;
+                    if (dev.OutputLength >= 64) length = dev.OutputLength;
+                    if (dev.InputLength >= 64) commandIn = dev.InputLength;
+                }
+                else if (dev.UsagePage == 0xFF00)
+                {
+                    events = dev.Path;
+                    if (dev.InputLength >= 64) eventIn = dev.InputLength;
+                }
+            }
+            if (command == null) continue;
+            model = candidate;
+            statusPath = command;
+            eventPath = events;
+            outLen = length;
+            commandReportIn = commandIn;
+            eventReportIn = eventIn;
+            break;
         }
         if (statusPath == null) return;
 
+        protocol = model.Protocol;
         deviceLost = false;
+        if (protocol == DialProtocol.NovaElite)
+        {
+            eliteCommandPath = statusPath;
+            eliteOutLen = outLen;
+        }
         var readers = new List<FileStream>();
         try
         {
-            readers.Add(StartReader(statusPath));
-            if (eventPath != null) readers.Add(StartReader(eventPath));
+            int readLength = protocol == DialProtocol.NovaElite ? commandReportIn : 65;
+            readers.Add(StartReader(statusPath, readLength));
+            if (eventPath != null) readers.Add(StartReader(eventPath, protocol == DialProtocol.NovaElite ? eventReportIn : 65));
 
-            // A separate handle for writing: synchronous HID handles serialize I/O, so a pending
-            // read on the same handle would block the status request.
-            using (var writer = Hid.Open(statusPath))
+            using (var writer = Hid.Open(statusPath, protocol == DialProtocol.NovaElite ? outLen : 65))
             {
-                var request = new byte[65];
-                request[1] = 0xB0;
-                int tick = 0;
-                while (!deviceLost)
+                int reportLength = protocol == DialProtocol.NovaElite ? outLen : 65;
+                var request = new byte[reportLength];
+                if (protocol == DialProtocol.NovaElite)
                 {
-                    if (tick++ % 50 == 0 || requestStatus) // every 5 s, or right after a connection change
+                    request[0] = 0x01;
+                    request[1] = 0xB0;
+                    writer.Write(EliteCommand(reportLength, 0x49, 0x01), 0, reportLength);
+                }
+                else request[1] = 0xB0;
+
+                int tick = 0;
+                while (!deviceLost && !stopping)
+                {
+                    if (tick++ % 50 == 0 || requestStatus)
                     {
                         requestStatus = false;
                         writer.Write(request, 0, request.Length);
                     }
+                    if (rearmChatMix && protocol == DialProtocol.NovaElite)
+                    {
+                        rearmChatMix = false;
+                        writer.Write(EliteCommand(reportLength, 0x49, 0x01), 0, reportLength);
+                    }
                     Thread.Sleep(100);
+                }
+                if (stopping && protocol == DialProtocol.NovaElite)
+                {
+                    try { writer.Write(EliteCommand(reportLength, 0x49, 0x00), 0, reportLength); }
+                    catch (Exception) { }
                 }
             }
         }
         finally
         {
+            eliteCommandPath = null;
             foreach (var r in readers) r.Dispose();
         }
     }
 
-    FileStream StartReader(string path)
+    static byte[] EliteCommand(int reportLength, byte command, byte value)
     {
-        var stream = Hid.Open(path);
+        var buf = new byte[reportLength];
+        buf[0] = 0x01;
+        buf[1] = command;
+        buf[2] = value;
+        return buf;
+    }
+
+    FileStream StartReader(string path, int reportLength)
+    {
+        var stream = Hid.Open(path, reportLength);
         new Thread(() =>
         {
-            var buf = new byte[65];
+            var buf = new byte[reportLength];
             try
             {
                 while (true)
@@ -863,24 +996,79 @@ class ArctisHid
 
     void Parse(byte[] r, int n)
     {
-        if (n >= 4 && r[1] == 0x45 && r[2] <= 100 && r[3] <= 100)
-        {
-            PublishMix(r[2], r[3]);
-        }
+        if (protocol == DialProtocol.NovaElite) ParseElite(r, n);
+        else ParseArctis7Plus(r, n);
+    }
+
+    void ParseArctis7Plus(byte[] r, int n)
+    {
+        if (n >= 4 && r[1] == 0x45 && r[2] <= 100 && r[3] <= 100) PublishMix(r[2], r[3]);
         else if (n >= 7 && r[1] == 0xB0)
         {
             bool online = r[2] != 0x01 && r[5] <= 100 && r[6] <= 100;
-            Publish(new HeadsetStatus { Known = true, Online = online, Battery = Math.Min((int)r[3], 4), Charging = r[4] == 0x01 });
+            Publish(new HeadsetStatus { Known = true, Online = online, Battery = Math.Min((int)r[3], 4), BatteryMax = 4, Charging = r[4] == 0x01 });
             if (online) PublishMix(r[5], r[6]);
         }
         else if (n >= 3 && r[1] == 0xBB)
         {
-            lock (statusLock) { var st = lastStatus; st.Known = true; st.Online = r[2] == 0x03; Publish(st); }
-            requestStatus = true; // fetch charging state and dial position right away
+            lock (statusLock) { var st = lastStatus; st.Known = true; st.Online = r[2] == 0x03; st.BatteryMax = 4; Publish(st); }
+            requestStatus = true;
         }
         else if (n >= 3 && r[1] == 0xB7 && r[2] <= 4)
         {
-            lock (statusLock) { var st = lastStatus; st.Known = true; st.Battery = r[2]; Publish(st); }
+            lock (statusLock) { var st = lastStatus; st.Known = true; st.Battery = r[2]; st.BatteryMax = 4; Publish(st); }
+        }
+    }
+
+    void ParseElite(byte[] r, int n)
+    {
+        if (n < 3) return;
+        if (r[0] == 0x07 && r[1] == 0x45 && n >= 4 && r[2] <= 100 && r[3] <= 100) PublishMix(r[2], r[3]);
+        else if (r[0] == 0x01 && r[1] == 0xB0 && n >= 16)
+        {
+            HeadsetStatus prev;
+            lock (statusLock) prev = lastStatus;
+            bool online = r[14] == 0x08;
+            Publish(new HeadsetStatus
+            {
+                Known = true,
+                Online = online,
+                Battery = Math.Min((int)r[6], 100),
+                BatteryMax = 100,
+                DockBattery = Math.Min((int)r[7], 100),
+                HasDockBattery = true,
+                Charging = r[15] == 0x02
+            });
+            if (online && !prev.Online) rearmChatMix = true;
+        }
+        else if (r[0] == 0x07 && r[1] == 0xB7 && n >= 5 && r[2] <= 100 && r[3] <= 100)
+        {
+            lock (statusLock)
+            {
+                if (!lastStatus.Known) return;
+                var st = lastStatus;
+                st.Battery = r[2];
+                st.BatteryMax = 100;
+                st.DockBattery = r[3];
+                st.HasDockBattery = true;
+                st.Charging = r[4] == 0x02;
+                Publish(st);
+            }
+        }
+        else if (r[0] == 0x07 && r[1] == 0xB5 && n >= 5)
+        {
+            HeadsetStatus prev;
+            lock (statusLock) prev = lastStatus;
+            if (!prev.Known) { requestStatus = true; return; }
+            bool online = r[4] == 0x08;
+            if (online != prev.Online)
+            {
+                var st = prev;
+                st.Online = online;
+                Publish(st);
+                if (online) rearmChatMix = true;
+            }
+            requestStatus = true;
         }
     }
 
@@ -900,7 +1088,7 @@ class ArctisHid
 
 static class Hid
 {
-    public class DeviceInfo { public string Path; public ushort UsagePage, Usage; }
+    public class DeviceInfo { public string Path; public ushort UsagePage, Usage, InputLength, OutputLength; }
 
     public static List<DeviceInfo> Enumerate(ushort vid, ushort[] pids)
     {
@@ -937,7 +1125,7 @@ static class Hid
                     HIDP_CAPS caps;
                     HidP_GetCaps(preparsed, out caps);
                     HidD_FreePreparsedData(preparsed);
-                    result.Add(new DeviceInfo { Path = path, UsagePage = caps.UsagePage, Usage = caps.Usage });
+                    result.Add(new DeviceInfo { Path = path, UsagePage = caps.UsagePage, Usage = caps.Usage, InputLength = caps.InputReportByteLength, OutputLength = caps.OutputReportByteLength });
                 }
             }
         }
@@ -945,11 +1133,13 @@ static class Hid
         return result;
     }
 
-    public static FileStream Open(string path)
+    public static FileStream Open(string path) { return Open(path, 65); }
+
+    public static FileStream Open(string path, int reportLength)
     {
         var h = CreateFile(path, 0xC0000000 /* GENERIC_READ | GENERIC_WRITE */, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
         if (h.IsInvalid) throw new IOException("Cannot open " + path);
-        return new FileStream(h, FileAccess.ReadWrite, 65, false);
+        return new FileStream(h, FileAccess.ReadWrite, reportLength, false);
     }
 
     [StructLayout(LayoutKind.Sequential)] struct SP_DEVICE_INTERFACE_DATA { public int cbSize; public Guid guid; public int flags; public IntPtr reserved; }
