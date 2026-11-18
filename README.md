@@ -4,7 +4,7 @@
 
 # MixDial
 
-**Use the game/chat mix dial on your SteelSeries Arctis 7+ — without SteelSeries GG.**
+**Use the game/chat mix dial on a SteelSeries Arctis 7+ or Arctis Nova Elite — without SteelSeries GG.**
 
 [![Latest release](https://img.shields.io/github/v/release/dialworks/MixDial?label=download&color=46c86e)](https://github.com/dialworks/MixDial/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/dialworks/MixDial/total?color=50a0ff)](https://github.com/dialworks/MixDial/releases)
@@ -60,7 +60,13 @@ That's it. Turn the dial.
 | SteelSeries Arctis 7+         | `1038:220E` |
 | SteelSeries Arctis 7P+        | `1038:2212` |
 | SteelSeries Arctis 7X+        | `1038:2216` |
-| SteelSeries Arctis 7+ Destiny | `1038:2236` |
+| SteelSeries Arctis 7+ Destiny    | `1038:2236` |
+| SteelSeries Arctis Nova Elite    | `1038:2244` |
+| SteelSeries Arctis Nova Elite SNG| `1038:2270` |
+
+On the Nova Elite the wheel is a volume knob until ChatMix is switched on. MixDial turns ChatMix on
+while it is running and turns it off again when you quit. Press the wheel once if it is still changing
+the system volume — that toggles the wheel between volume and the mix. The Arctis 7+ dial is unchanged.
 
 Have a different model? Other headsets use a different protocol, so they aren't supported yet —
 [open an issue](https://github.com/dialworks/MixDial/issues) or send a pull request.
@@ -125,8 +131,10 @@ Then check whether it's ticked in <b>Chat apps</b>: ticked apps follow chat, eve
 <details>
 <summary><b>Does it change anything on the headset?</b></summary>
 <br>
-No. MixDial only reads from the headset. The one thing it ever sends is a status query — it never changes
-headset settings or firmware.
+On an Arctis 7+ it only sends a status query. The Nova Elite dial does not report a mix until ChatMix
+is on, so MixDial sends that enable command when it connects and the matching disable command when you
+quit. It does not change the equalizer, sidetone, microphone, or firmware, and it does not store
+anything on the headset.
 </details>
 
 <details>
@@ -140,14 +148,18 @@ too, delete <code>%APPDATA%\MixDial</code> and the registry key <code>HKCU\Softw
 <summary><b>How does it talk to the dongle?</b></summary>
 <br>
 
-It listens on the dongle's vendor-specific HID interfaces:
+It listens on the receiver's vendor-specific HID interfaces (usage page `0xFF00` for events, `0xFFC0` for requests).
 
-| Interface (usage page) | Report | Meaning |
-|---|---|---|
-| `0xFF00` (push) | `45 <game> <chat>` | Dial moved (0–100 each) |
-| `0xFF00` (push) | `BB <03 \| 00>` | Headset connected / off |
-| `0xFF00` (push) | `B7 <0–4>` | Battery level changed |
-| `0xFFC0` (request) | `B0` → `B0 <online> <battery> <charging> <game> <chat>` | Status query |
+**Arctis 7+** uses report id `0x00`:
+
+| Report | Meaning |
+|---|---|
+| `45 <game> <chat>` | Dial moved (0–100 each) |
+| `BB <03 \| 00>` | Headset connected / off |
+| `B7 <0–4>` | Battery level changed |
+| `B0` → `B0 <online> <battery> <charging> <game> <chat>` | Status query |
+
+**Arctis Nova Elite** uses report id `0x01` for commands and `0x07` for events. Its battery is a percentage, and the base reports a spare battery. The 7+ menu and reports are unchanged. |
 
 </details>
 
