@@ -60,7 +60,7 @@ class TrayApp : ApplicationContext
 {
     readonly NotifyIcon tray = new NotifyIcon();
     readonly ContextMenuStrip menu = new ContextMenuStrip();
-    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, ancMenu, enabledItem, popupItem, notifyItem, startupItem;
+    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, ancMenu, sidetoneMenu, enabledItem, popupItem, notifyItem, startupItem;
     readonly MixPopup popup = new MixPopup();
     bool firstMix = true;
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 500 };
@@ -95,6 +95,8 @@ class TrayApp : ApplicationContext
 
         ancMenu = new ToolStripMenuItem("ANC") { Visible = false };
         ancMenu.DropDownOpening += (s, e) => BuildAncMenu();
+        sidetoneMenu = new ToolStripMenuItem("Sidetone") { Visible = false };
+        sidetoneMenu.DropDownOpening += (s, e) => BuildSidetoneMenu();
 
         enabledItem = new ToolStripMenuItem("Mix enabled") { Checked = true, CheckOnClick = true };
         enabledItem.CheckedChanged += (s, e) => { if (!enabledItem.Checked) mixer.Restore(); Apply(); };
@@ -114,7 +116,7 @@ class TrayApp : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[] {
             mixLabel, headsetLabel, deviceLabel, new ToolStripSeparator(),
-            chatAppsMenu, mediaAppsMenu, ancMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
+            chatAppsMenu, mediaAppsMenu, ancMenu, sidetoneMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (s, e) => ExitThread())
         });
         tray.ContextMenuStrip = menu;
@@ -204,7 +206,8 @@ class TrayApp : ApplicationContext
     {
         mixLabel.Text = string.Format("Game {0}%  ·  Chat {1}%  ·  Media full", game, chat);
         headsetLabel.Text = HeadsetLine();
-        ancMenu.Visible = status.Elite && status.Known;
+        bool elite = status.Elite && status.Known;
+        ancMenu.Visible = sidetoneMenu.Visible = elite;
         deviceLabel.Text = mixer.DeviceName != null ? "Output: " + mixer.DeviceName : "Output: Arctis audio device not found";
 
         string tip = string.Format("MixDial  ·  Game {0}%  ·  Chat {1}%", game, chat);
@@ -243,6 +246,28 @@ class TrayApp : ApplicationContext
             var item = new ToolStripMenuItem(labels[i]) { Checked = status.MicKnown && status.AncMode == mode };
             item.Click += (s, e) => hid.SendElite(0xBD, (byte)mode);
             ancMenu.DropDownItems.Add(item);
+        }
+    }
+
+    void BuildSidetoneMenu()
+    {
+        sidetoneMenu.DropDownItems.Clear();
+        if (!status.SidetoneKnown)
+            sidetoneMenu.DropDownItems.Add(new ToolStripMenuItem("Level unknown until the headset reports it") { Enabled = false });
+        var on = new ToolStripMenuItem("On") { Checked = status.SidetoneKnown && status.SidetoneOn };
+        on.Click += (s, e) =>
+        {
+            int level = status.SidetoneKnown ? status.SidetoneLevel : 5;
+            hid.SendElite(0x38, (byte)(on.Checked ? 0 : 1), (byte)level);
+        };
+        sidetoneMenu.DropDownItems.Add(on);
+        sidetoneMenu.DropDownItems.Add(new ToolStripSeparator());
+        for (int level = 1; level <= 10; level++)
+        {
+            int n = level;
+            var item = new ToolStripMenuItem("Level " + n) { Checked = status.SidetoneKnown && status.SidetoneLevel == n };
+            item.Click += (s, e) => hid.SendElite(0x38, (byte)(!status.SidetoneKnown || status.SidetoneOn ? 1 : 0), (byte)n);
+            sidetoneMenu.DropDownItems.Add(item);
         }
     }
 
@@ -844,8 +869,8 @@ interface IAudioSessionNotification
 
 struct HeadsetStatus
 {
-    public bool Known, Online, Charging, HasDockBattery, Elite, MicKnown, MicMuted;
-    public int Battery, BatteryMax, DockBattery, AncMode;
+    public bool Known, Online, Charging, HasDockBattery, Elite, MicKnown, MicMuted, SidetoneKnown, SidetoneOn;
+    public int Battery, BatteryMax, DockBattery, AncMode, SidetoneLevel;
 }
 
 enum DialProtocol { Arctis7Plus, NovaElite }
@@ -1105,7 +1130,10 @@ class ArctisHid
                 Charging = r[15] == 0x02,
                 MicKnown = true,
                 MicMuted = r[9] != 0,
-                AncMode = r[10] <= 2 ? r[10] : 0
+                AncMode = r[10] <= 2 ? r[10] : 0,
+                SidetoneKnown = prev.SidetoneKnown,
+                SidetoneOn = prev.SidetoneOn,
+                SidetoneLevel = prev.SidetoneLevel
             });
             if (online && !prev.Online) rearmChatMix = true;
         }
@@ -1160,6 +1188,19 @@ class ArctisHid
                 st.Elite = true;
                 st.MicKnown = true;
                 st.AncMode = r[2];
+                Publish(st);
+            }
+        }
+        else if (r[0] == 0x07 && r[1] == 0x38 && n >= 4 && r[3] >= 1 && r[3] <= 10)
+        {
+            lock (statusLock)
+            {
+                if (!lastStatus.Known) return;
+                var st = lastStatus;
+                st.Elite = true;
+                st.SidetoneKnown = true;
+                st.SidetoneOn = r[2] != 0;
+                st.SidetoneLevel = r[3];
                 Publish(st);
             }
         }
