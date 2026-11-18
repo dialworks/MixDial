@@ -20,8 +20,9 @@
 ---
 
 MixDial is a tiny tray app that reads the mix dial straight from the headset's USB dongle and turns it into
-per-app volume. **Chat apps** (Discord, TeamSpeak, Teams, …) follow the chat side of the dial, and
-**everything else** playing on the headset follows the game side.
+per-app volume. **Chat apps** follow the chat side of the dial, **media apps** stay at full volume, and
+**everything else** playing on the headset follows the game side. An app on both lists follows chat.
+This applies to every supported headset.
 
 No drivers, no installer, no background services, no telemetry — one small exe, built from a single C# file
 you can read in a few minutes.
@@ -35,7 +36,7 @@ you can read in a few minutes.
 | 🪟 **On-screen popup** | A small overlay while you turn the dial (optional, never steals focus) |
 | 🔋 **Battery & charging** | Battery level in the tray menu, plus a heads-up when it runs low |
 | 🔔 **Connect notifications** | Know when the headset connects, turns off or goes out of range |
-| 💬 **Pick your chat apps** | Tick apps right from the tray menu, or edit a plain text list |
+| 💬 **Pick chat and media apps** | Tick apps from the tray menu, or edit a plain text list. Media stays full on every headset |
 | 🚀 **Start with Windows** | One click, runs quietly in the tray |
 | ↩️ **Leaves no mess** | App volumes go back to 100% when you pause or quit |
 
@@ -77,15 +78,16 @@ Right-click the tray icon:
 
 | Menu item | What it does |
 |---|---|
-| **Chat apps** | Lists apps currently playing on the headset — tick the ones that should follow the chat side. *Edit chat app list…* opens the full list in Notepad. |
+| **Chat apps** | Apps playing on the headset. Ticked ones follow the chat side. |
+| **Media apps** | Ticked apps stay at full volume on every supported headset. Chat wins if an app is on both lists. |
 | **Mix enabled** | Pause / resume. Pausing puts app volumes back to 100%. |
 | **Show popup when turning dial** | Toggle the on-screen overlay. |
 | **Notifications** | Toggle connect / disconnect / battery notifications. |
 | **Start with Windows** | Launch MixDial when you log in. |
 
-Common chat apps (Discord, TeamSpeak, Mumble, Teams, Zoom, Slack, Skype, WhatsApp, Telegram, …) are on the list
-out of the box. The list lives in `%APPDATA%\MixDial\chat-apps.txt` — one process name per line, `#` for
-comments — and changes apply as soon as you save.
+Common chat apps and common browsers and players are on the lists out of the box. The lists live in
+`%APPDATA%\MixDial\chat-apps.txt` and `media-apps.txt` — one process name per line, `#` for comments —
+and changes apply as soon as you save.
 
 ## Requirements
 
@@ -125,7 +127,7 @@ app's volume on that device instead — exactly what the Windows Volume Mixer do
 <summary><b>An app isn't reacting to the dial.</b></summary>
 <br>
 Make sure it's playing through the headset (not your speakers) and has made a sound since it started.
-Then check whether it's ticked in <b>Chat apps</b>: ticked apps follow chat, everything else follows game.
+Then check the lists: ticked chat apps follow chat, ticked media apps stay full, and everything else follows game.
 </details>
 
 <details>

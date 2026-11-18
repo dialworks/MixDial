@@ -3,7 +3,8 @@
 //
 // The dongle reports the dial as two levels (game 0-100, chat 0-100). Windows only exposes a single
 // output device for the headset, so the mix is applied per application: apps on the chat list follow
-// the chat level, every other app playing on the headset follows the game level.
+// the chat level, apps on the media list stay at full volume, and every other app follows the game
+// level. An app on both lists follows chat. This split is done in Windows and applies to every headset.
 
 using System;
 using System.Collections.Generic;
@@ -59,7 +60,7 @@ class TrayApp : ApplicationContext
 {
     readonly NotifyIcon tray = new NotifyIcon();
     readonly ContextMenuStrip menu = new ContextMenuStrip();
-    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, enabledItem, popupItem, notifyItem, startupItem;
+    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, enabledItem, popupItem, notifyItem, startupItem;
     readonly MixPopup popup = new MixPopup();
     bool firstMix = true;
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 500 };
@@ -67,7 +68,8 @@ class TrayApp : ApplicationContext
     readonly System.Windows.Forms.Timer connectedTimer = new System.Windows.Forms.Timer { Interval = 1500 };
     bool firstStatus = true;
     readonly AudioMixer mixer = new AudioMixer();
-    readonly ChatAppList chatApps = new ChatAppList();
+    readonly AppNameList chatApps = new AppNameList("chat-apps.txt", AppNameList.ChatDefaults);
+    readonly AppNameList mediaApps = new AppNameList("media-apps.txt", AppNameList.MediaDefaults);
     readonly ArctisHid hid;
 
     int game = 100, chat = 100;
@@ -85,7 +87,11 @@ class TrayApp : ApplicationContext
 
         chatAppsMenu = new ToolStripMenuItem("Chat apps");
         chatAppsMenu.DropDownItems.Add("...");
-        chatAppsMenu.DropDownOpening += (s, e) => BuildChatAppsMenu();
+        chatAppsMenu.DropDownOpening += (s, e) => BuildAppMenu(chatAppsMenu, chatApps, "checked = chat", "Edit chat app list...");
+
+        mediaAppsMenu = new ToolStripMenuItem("Media apps");
+        mediaAppsMenu.DropDownItems.Add("...");
+        mediaAppsMenu.DropDownOpening += (s, e) => BuildAppMenu(mediaAppsMenu, mediaApps, "checked = full volume", "Edit media app list...");
 
         enabledItem = new ToolStripMenuItem("Mix enabled") { Checked = true, CheckOnClick = true };
         enabledItem.CheckedChanged += (s, e) => { if (!enabledItem.Checked) mixer.Restore(); Apply(); };
@@ -105,7 +111,7 @@ class TrayApp : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[] {
             mixLabel, headsetLabel, deviceLabel, new ToolStripSeparator(),
-            chatAppsMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
+            chatAppsMenu, mediaAppsMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (s, e) => ExitThread())
         });
         tray.ContextMenuStrip = menu;
@@ -138,8 +144,9 @@ class TrayApp : ApplicationContext
     void Apply()
     {
         chatApps.ReloadIfChanged();
+        mediaApps.ReloadIfChanged();
         if (enabledItem.Checked)
-            mixer.Apply(game / 100f, chat / 100f, chatApps.Contains);
+            mixer.Apply(game / 100f, chat / 100f, chatApps.Contains, mediaApps.Contains);
         else
             mixer.Sessions(); // keeps the device lookup current for the menu
         RefreshUi();
@@ -192,7 +199,7 @@ class TrayApp : ApplicationContext
 
     void RefreshUi()
     {
-        mixLabel.Text = string.Format("Game {0}%  ·  Chat {1}%", game, chat);
+        mixLabel.Text = string.Format("Game {0}%  ·  Chat {1}%  ·  Media full", game, chat);
         headsetLabel.Text = !status.Known ? "Headset: looking for dongle..."
             : !status.Online ? "Headset: off / out of range"
             : string.Format("Headset: on  ·  battery {0}{1}", BatteryText, status.Charging ? " (charging)" : "");
@@ -205,26 +212,25 @@ class TrayApp : ApplicationContext
         UpdateIcon();
     }
 
-    void BuildChatAppsMenu()
+    void BuildAppMenu(ToolStripMenuItem menu, AppNameList list, string checkedMeans, string editLabel)
     {
-        chatAppsMenu.DropDownItems.Clear();
+        menu.DropDownItems.Clear();
         var running = mixer.Sessions().Select(s => s.Name).Where(n => n != AudioMixer.SystemSoundsName)
             .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
 
-        var header = new ToolStripMenuItem("Apps playing on the headset (checked = chat):") { Enabled = false };
-        chatAppsMenu.DropDownItems.Add(header);
+        menu.DropDownItems.Add(new ToolStripMenuItem("Apps playing on the headset (" + checkedMeans + "):") { Enabled = false });
         if (running.Count == 0)
-            chatAppsMenu.DropDownItems.Add(new ToolStripMenuItem("(none right now)") { Enabled = false });
+            menu.DropDownItems.Add(new ToolStripMenuItem("(none right now)") { Enabled = false });
         foreach (var name in running)
         {
             var app = name;
-            var item = new ToolStripMenuItem(app) { Checked = chatApps.Contains(app) };
-            item.Click += (s, e) => { chatApps.Toggle(app); Apply(); };
-            chatAppsMenu.DropDownItems.Add(item);
+            var item = new ToolStripMenuItem(app) { Checked = list.Contains(app) };
+            item.Click += (s, e) => { list.Toggle(app); Apply(); };
+            menu.DropDownItems.Add(item);
         }
-        chatAppsMenu.DropDownItems.Add(new ToolStripSeparator());
-        chatAppsMenu.DropDownItems.Add(new ToolStripMenuItem("Edit chat app list...", null,
-            (s, e) => Process.Start("notepad.exe", "\"" + chatApps.FilePath + "\"")));
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(new ToolStripMenuItem(editLabel, null,
+            (s, e) => Process.Start("notepad.exe", "\"" + list.FilePath + "\"")));
     }
 
     void UpdateIcon()
@@ -272,15 +278,15 @@ class TrayApp : ApplicationContext
 }
 
 // ---------------------------------------------------------------------------------------------
-// Chat app list (one process name per line in %APPDATA%\MixDial\chat-apps.txt)
+// App lists (one process name per line in %APPDATA%\MixDial\)
 // ---------------------------------------------------------------------------------------------
 
-class ChatAppList
+class AppNameList
 {
-    const string Defaults =
+    public const string ChatDefaults =
 @"# MixDial chat apps
 # One process name per line (with or without .exe). Lines starting with # are ignored.
-# These apps follow the CHAT side of the dial; every other app follows the GAME side.
+# These apps follow the CHAT side of the dial. Chat wins over the media list.
 Discord
 DiscordPTB
 DiscordCanary
@@ -298,18 +304,36 @@ WhatsApp
 Telegram
 ";
 
-    public readonly string FilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MixDial", "chat-apps.txt");
+    public const string MediaDefaults =
+@"# MixDial media apps
+# One process name per line (with or without .exe). Lines starting with # are ignored.
+# These apps stay at full volume on every supported headset. Chat wins if an app is on both lists.
+firefox
+chrome
+msedge
+brave
+opera
+spotify
+vlc
+mpv
+wmplayer
+Music.UI
+foobar2000
+MusicBee
+iTunes
+";
 
+    public readonly string FilePath;
     HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     DateTime loadedStamp;
 
-    public ChatAppList()
+    public AppNameList(string fileName, string defaults)
     {
+        FilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MixDial", fileName);
         if (!File.Exists(FilePath))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
-            File.WriteAllText(FilePath, Defaults);
+            File.WriteAllText(FilePath, defaults);
         }
         ReloadIfChanged();
     }
@@ -614,11 +638,11 @@ class AudioMixer
         return name;
     }
 
-    public void Apply(float game, float chat, Func<string, bool> isChat)
+    public void Apply(float game, float chat, Func<string, bool> isChat, Func<string, bool> isMedia)
     {
         foreach (var s in Sessions())
         {
-            float target = isChat(s.Name) ? chat : game;
+            float target = isChat(s.Name) ? chat : isMedia(s.Name) ? 1f : game;
             if (SetVolume(s, target)) touched.Add(s.Id);
         }
     }
