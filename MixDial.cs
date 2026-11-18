@@ -60,7 +60,7 @@ class TrayApp : ApplicationContext
 {
     readonly NotifyIcon tray = new NotifyIcon();
     readonly ContextMenuStrip menu = new ContextMenuStrip();
-    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, enabledItem, popupItem, notifyItem, startupItem;
+    readonly ToolStripMenuItem mixLabel, headsetLabel, deviceLabel, chatAppsMenu, mediaAppsMenu, ancMenu, enabledItem, popupItem, notifyItem, startupItem;
     readonly MixPopup popup = new MixPopup();
     bool firstMix = true;
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 500 };
@@ -93,6 +93,9 @@ class TrayApp : ApplicationContext
         mediaAppsMenu.DropDownItems.Add("...");
         mediaAppsMenu.DropDownOpening += (s, e) => BuildAppMenu(mediaAppsMenu, mediaApps, "checked = full volume", "Edit media app list...");
 
+        ancMenu = new ToolStripMenuItem("ANC") { Visible = false };
+        ancMenu.DropDownOpening += (s, e) => BuildAncMenu();
+
         enabledItem = new ToolStripMenuItem("Mix enabled") { Checked = true, CheckOnClick = true };
         enabledItem.CheckedChanged += (s, e) => { if (!enabledItem.Checked) mixer.Restore(); Apply(); };
 
@@ -111,7 +114,7 @@ class TrayApp : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[] {
             mixLabel, headsetLabel, deviceLabel, new ToolStripSeparator(),
-            chatAppsMenu, mediaAppsMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
+            chatAppsMenu, mediaAppsMenu, ancMenu, enabledItem, popupItem, notifyItem, startupItem, new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, (s, e) => ExitThread())
         });
         tray.ContextMenuStrip = menu;
@@ -200,9 +203,8 @@ class TrayApp : ApplicationContext
     void RefreshUi()
     {
         mixLabel.Text = string.Format("Game {0}%  ·  Chat {1}%  ·  Media full", game, chat);
-        headsetLabel.Text = !status.Known ? "Headset: looking for dongle..."
-            : !status.Online ? "Headset: off / out of range"
-            : string.Format("Headset: on  ·  battery {0}{1}", BatteryText, status.Charging ? " (charging)" : "");
+        headsetLabel.Text = HeadsetLine();
+        ancMenu.Visible = status.Elite && status.Known;
         deviceLabel.Text = mixer.DeviceName != null ? "Output: " + mixer.DeviceName : "Output: Arctis audio device not found";
 
         string tip = string.Format("MixDial  ·  Game {0}%  ·  Chat {1}%", game, chat);
@@ -210,6 +212,38 @@ class TrayApp : ApplicationContext
         if (!enabledItem.Checked) tip += "\n(paused)";
         tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
         UpdateIcon();
+    }
+
+    string HeadsetLine()
+    {
+        if (!status.Known) return "Headset: looking for dongle...";
+        if (!status.Online) return "Headset: off / out of range";
+        string text = string.Format("Headset: on  ·  battery {0}{1}", BatteryText, status.Charging ? " (charging)" : "");
+        if (status.Elite && status.MicKnown)
+            text += (status.MicMuted ? "  ·  mic muted" : "  ·  mic open") + "  ·  " + AncLabel(status.AncMode);
+        return text;
+    }
+
+    static string AncLabel(int mode)
+    {
+        if (mode == 1) return "transparency";
+        if (mode == 2) return "ANC";
+        return "ANC off";
+    }
+
+    void BuildAncMenu()
+    {
+        ancMenu.DropDownItems.Clear();
+        if (!status.MicKnown)
+            ancMenu.DropDownItems.Add(new ToolStripMenuItem("Waiting for the headset") { Enabled = false });
+        string[] labels = { "Off", "Transparency", "ANC" };
+        for (int i = 0; i < labels.Length; i++)
+        {
+            int mode = i;
+            var item = new ToolStripMenuItem(labels[i]) { Checked = status.MicKnown && status.AncMode == mode };
+            item.Click += (s, e) => hid.SendElite(0xBD, (byte)mode);
+            ancMenu.DropDownItems.Add(item);
+        }
     }
 
     void BuildAppMenu(ToolStripMenuItem menu, AppNameList list, string checkedMeans, string editLabel)
@@ -810,8 +844,8 @@ interface IAudioSessionNotification
 
 struct HeadsetStatus
 {
-    public bool Known, Online, Charging, HasDockBattery;
-    public int Battery, BatteryMax, DockBattery;
+    public bool Known, Online, Charging, HasDockBattery, Elite, MicKnown, MicMuted;
+    public int Battery, BatteryMax, DockBattery, AncMode;
 }
 
 enum DialProtocol { Arctis7Plus, NovaElite }
@@ -835,6 +869,7 @@ class ArctisHid
 
     readonly SynchronizationContext ui;
     readonly object statusLock = new object();
+    readonly Queue<byte[]> outbound = new Queue<byte[]>();
     volatile bool deviceLost, requestStatus, stopping, rearmChatMix;
     volatile string eliteCommandPath;
     int eliteOutLen = 64;
@@ -847,6 +882,15 @@ class ArctisHid
     public void Start()
     {
         new Thread(Run) { IsBackground = true, Name = "Arctis HID" }.Start();
+    }
+
+    public void SendElite(byte command, params byte[] payload)
+    {
+        if (payload == null || payload.Length > 2) return;
+        var item = new byte[1 + payload.Length];
+        item[0] = command;
+        Buffer.BlockCopy(payload, 0, item, 1, payload.Length);
+        lock (outbound) outbound.Enqueue(item);
     }
 
     public void Shutdown()
@@ -948,6 +992,7 @@ class ArctisHid
                         rearmChatMix = false;
                         writer.Write(EliteCommand(reportLength, 0x49, 0x01), 0, reportLength);
                     }
+                    if (protocol == DialProtocol.NovaElite) DrainOutbound(writer, reportLength);
                     Thread.Sleep(100);
                 }
                 if (stopping && protocol == DialProtocol.NovaElite)
@@ -964,13 +1009,32 @@ class ArctisHid
         }
     }
 
-    static byte[] EliteCommand(int reportLength, byte command, byte value)
+    void DrainOutbound(FileStream writer, int reportLength)
+    {
+        byte[][] batch;
+        lock (outbound)
+        {
+            if (outbound.Count == 0) return;
+            batch = outbound.ToArray();
+            outbound.Clear();
+        }
+        foreach (var item in batch)
+            writer.Write(EliteCommand(reportLength, item[0], item.Length > 1 ? item[1] : (byte)0, item.Length > 2 ? item[2] : (byte)0, item.Length - 1), 0, reportLength);
+    }
+
+    static byte[] EliteCommand(int reportLength, byte command, byte a, byte b, int payloadLength)
     {
         var buf = new byte[reportLength];
         buf[0] = 0x01;
         buf[1] = command;
-        buf[2] = value;
+        if (payloadLength >= 1) buf[2] = a;
+        if (payloadLength >= 2) buf[3] = b;
         return buf;
+    }
+
+    static byte[] EliteCommand(int reportLength, byte command, byte value)
+    {
+        return EliteCommand(reportLength, command, value, 0, 1);
     }
 
     FileStream StartReader(string path, int reportLength)
@@ -1033,11 +1097,15 @@ class ArctisHid
             {
                 Known = true,
                 Online = online,
+                Elite = true,
                 Battery = Math.Min((int)r[6], 100),
                 BatteryMax = 100,
                 DockBattery = Math.Min((int)r[7], 100),
                 HasDockBattery = true,
-                Charging = r[15] == 0x02
+                Charging = r[15] == 0x02,
+                MicKnown = true,
+                MicMuted = r[9] != 0,
+                AncMode = r[10] <= 2 ? r[10] : 0
             });
             if (online && !prev.Online) rearmChatMix = true;
         }
@@ -1051,6 +1119,7 @@ class ArctisHid
                 st.BatteryMax = 100;
                 st.DockBattery = r[3];
                 st.HasDockBattery = true;
+                st.Elite = true;
                 st.Charging = r[4] == 0x02;
                 Publish(st);
             }
@@ -1069,6 +1138,30 @@ class ArctisHid
                 if (online) rearmChatMix = true;
             }
             requestStatus = true;
+        }
+        else if (r[0] == 0x07 && r[1] == 0xBB && n >= 3)
+        {
+            lock (statusLock)
+            {
+                if (!lastStatus.Known) return;
+                var st = lastStatus;
+                st.Elite = true;
+                st.MicKnown = true;
+                st.MicMuted = r[2] != 0;
+                Publish(st);
+            }
+        }
+        else if (r[0] == 0x07 && r[1] == 0xBD && n >= 3 && r[2] <= 2)
+        {
+            lock (statusLock)
+            {
+                if (!lastStatus.Known) return;
+                var st = lastStatus;
+                st.Elite = true;
+                st.MicKnown = true;
+                st.AncMode = r[2];
+                Publish(st);
+            }
         }
     }
 
