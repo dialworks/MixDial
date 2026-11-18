@@ -296,6 +296,10 @@ class TrayApp : ApplicationContext
     void BuildEqMenu()
     {
         eqMenu.DropDownItems.Clear();
+        var edit = new ToolStripMenuItem("Edit wireless curve…");
+        edit.Click += (s, e) => OpenEqEditor();
+        eqMenu.DropDownItems.Add(edit);
+        eqMenu.DropDownItems.Add(new ToolStripSeparator());
         if (eqSnapshot == null)
         {
             eqMenu.DropDownItems.Add(new ToolStripMenuItem("Reading the headset…") { Enabled = false });
@@ -306,6 +310,18 @@ class TrayApp : ApplicationContext
         eqMenu.DropDownItems.Add(GainsMenu("Microphone", eqSnapshot.MicPreset, eqSnapshot.MicGains));
         eqMenu.DropDownItems.Add(GainsMenu("Bluetooth", eqSnapshot.BtPreset, eqSnapshot.BtGains));
         if (measured != null) eqMenu.DropDownItems.Add(measured);
+    }
+
+    EqEditor eqEditor;
+
+    void OpenEqEditor()
+    {
+        if (eqEditor == null || eqEditor.IsDisposed)
+        {
+            eqEditor = new EqEditor(hid, eqSnapshot);
+            eqEditor.Show();
+        }
+        else eqEditor.Activate();
     }
 
     static ToolStripMenuItem CurveMenu(string title, int preset, EqBand[] bands)
@@ -525,6 +541,341 @@ iTunes
         }
         catch (IOException) { }               // file locked by an editor: the click is simply ignored
         catch (UnauthorizedAccessException) { }
+    }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Onboard EQ editor (Nova Elite wireless curve, Custom slot)
+// ---------------------------------------------------------------------------------------------
+
+class EqEditor : Form
+{
+    static readonly int[] StandardFreqs = { 32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 };
+    // Scores are AutoEq's Harman preference scores for that headphone (oratory1990 over-ear list).
+    // Gains are that model's published 10-band correction, in tenths of a dB, at 31/62 Hz mapped onto 32/64 Hz.
+    static readonly string[] PresetNames = {
+        "E3  101", "SRH440  96", "Sundara  95", "Ananda  94", "X2HR  94", "HD 550  94",
+        "HD 560S  93", "Noire X  92", "HD 600  91",
+        "Flat", "Bass", "Treble", "Vocal", "V shape", "Warm"
+    };
+    static readonly int[] PresetScores = { 101, 96, 95, 94, 94, 94, 93, 92, 91, 0, 0, 0, 0, 0, 0 };
+    static readonly int[][] PresetGains = {
+        new[] { -3, -3, -1, 3, -7, 13, 0, -9, 1, -37 },
+        new[] { 52, 3, -18, 11, -3, 4, -4, 26, -19, -20 },
+        new[] { 65, 17, 5, -19, 1, -20, 21, -2, 18, -62 },
+        new[] { 44, 13, -3, -6, -4, -1, 23, -10, -5, -120 },
+        new[] { 68, -18, -7, -9, 0, 0, 6, 0, 10, -19 },
+        new[] { 66, 22, 1, -19, 2, -16, 15, 2, 26, -72 },
+        new[] { 59, 16, 0, -10, 8, -16, 8, -13, 35, -81 },
+        new[] { -10, 4, -18, -3, 8, 4, -11, -2, 25, -87 },
+        new[] { 69, 33, -11, -16, 6, -8, 1, -10, 39, -65 },
+        new[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        new[] { 60, 45, 25, 10, 0, 0, -5, -10, -10, -15 },
+        new[] { -10, -5, 0, 0, 0, 10, 25, 40, 45, 40 },
+        new[] { -20, -10, 0, 15, 35, 40, 25, 5, -10, -15 },
+        new[] { 45, 30, 10, 0, -15, -20, -5, 20, 40, 50 },
+        new[] { 30, 25, 15, 5, 0, -5, -15, -20, -25, -20 }
+    };
+
+    readonly ArctisHid hid;
+    readonly EqGraph graph;
+    readonly Label statusLabel;
+    readonly Button[] presetButtons;
+    string chosen = "Custom";
+    bool dirty;
+
+    public EqEditor(ArctisHid hid, EqSnapshot snapshot)
+    {
+        this.hid = hid;
+        Text = "Onboard EQ";
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(22, 22, 26);
+        ForeColor = Color.FromArgb(236, 236, 236);
+        Font = new Font("Segoe UI", 9.5f);
+        ClientSize = new Size(760, 520);
+        DoubleBuffered = true;
+
+        var presets = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 96,
+            Padding = new Padding(16, 12, 16, 0),
+            BackColor = Color.FromArgb(22, 22, 26),
+            WrapContents = true,
+            AutoScroll = true
+        };
+        presetButtons = new Button[PresetNames.Length];
+        for (int i = 0; i < PresetNames.Length; i++)
+        {
+            int index = i;
+            var button = new Button
+            {
+                Text = PresetNames[i],
+                AutoSize = true,
+                Height = 30,
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(0, 0, 8, 0),
+                ForeColor = Color.FromArgb(236, 236, 236),
+                BackColor = Color.FromArgb(42, 42, 48),
+                Cursor = Cursors.Hand
+            };
+            button.FlatAppearance.BorderSize = 0;
+            button.Click += (s, e) => ApplyPreset(index);
+            presetButtons[i] = button;
+            presets.Controls.Add(button);
+        }
+
+        graph = new EqGraph { Dock = DockStyle.Fill };
+        graph.Edited += (s, e) => { dirty = true; chosen = "Custom"; HighlightPreset(-1); statusLabel.Text = "Not applied"; };
+
+        var footer = new Panel { Dock = DockStyle.Bottom, Height = 64, BackColor = Color.FromArgb(22, 22, 26), Padding = new Padding(16, 12, 16, 16) };
+        statusLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Color.FromArgb(160, 160, 168),
+            Text = "Custom slot on the headset. Drag a point, or pick a preset."
+        };
+        var apply = new Button
+        {
+            Text = "Apply",
+            Dock = DockStyle.Right,
+            Width = 120,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(70, 200, 110),
+            ForeColor = Color.FromArgb(14, 28, 18),
+            Cursor = Cursors.Hand
+        };
+        apply.FlatAppearance.BorderSize = 0;
+        apply.Click += (s, e) =>
+        {
+            statusLabel.Text = "Sending…";
+            hid.WriteWirelessEq(graph.Bands, chosen);
+        };
+        footer.Controls.Add(statusLabel);
+        footer.Controls.Add(apply);
+
+        Controls.Add(graph);
+        Controls.Add(presets);
+        Controls.Add(footer);
+        AcceptButton = apply;
+
+        hid.EqChanged += OnEq;
+        FormClosed += (s, e) => hid.EqChanged -= OnEq;
+        if (snapshot != null) LoadSnapshot(snapshot, false);
+        else graph.SetBands(StandardBands());
+    }
+
+    void ApplyPreset(int index)
+    {
+        var bands = graph.Bands;
+        var gains = PresetGains[index];
+        for (int i = 0; i < bands.Length && i < gains.Length; i++)
+        {
+            bands[i].GainTenths = gains[i];
+            if (bands[i].Filter < 1 || bands[i].Filter > 5) bands[i].Filter = 1;
+            if (bands[i].QThousandths < 200) bands[i].QThousandths = 1414;
+        }
+        graph.SetBands(bands);
+        chosen = PresetNames[index];
+        dirty = true;
+        HighlightPreset(index);
+        statusLabel.Text = PresetScores[index] > 0
+            ? PresetNames[index] + " · AutoEq Harman score " + PresetScores[index] + " · 10-band correction for that headphone. Not applied yet."
+            : chosen + "  ·  not applied";
+    }
+
+    void HighlightPreset(int index)
+    {
+        for (int i = 0; i < presetButtons.Length; i++)
+            presetButtons[i].BackColor = i == index ? Color.FromArgb(70, 200, 110) : Color.FromArgb(42, 42, 48);
+        if (index >= 0) presetButtons[index].ForeColor = Color.FromArgb(14, 28, 18);
+        for (int i = 0; i < presetButtons.Length; i++)
+            if (i != index) presetButtons[i].ForeColor = Color.FromArgb(236, 236, 236);
+    }
+
+    void OnEq(EqSnapshot snapshot)
+    {
+        if (IsDisposed) return;
+        if (!dirty) LoadSnapshot(snapshot, false);
+        else if (Matches(snapshot)) statusLabel.Text = "On the headset  ·  " + chosen;
+    }
+
+    void LoadSnapshot(EqSnapshot snapshot, bool fromUser)
+    {
+        if (snapshot == null || snapshot.Wireless == null) return;
+        graph.SetBands(snapshot.Wireless.OrderBy(b => b.Frequency).ToArray());
+        if (!fromUser) { dirty = false; chosen = "Headset"; HighlightPreset(-1); statusLabel.Text = "Headset curve  ·  preset " + snapshot.WirelessPreset; }
+    }
+
+    bool Matches(EqSnapshot snapshot)
+    {
+        if (snapshot == null || snapshot.Wireless == null) return false;
+        var live = snapshot.Wireless.OrderBy(b => b.Frequency).ToArray();
+        var mine = graph.Bands;
+        if (live.Length != mine.Length) return false;
+        for (int i = 0; i < mine.Length; i++)
+            if (live[i].Frequency != mine[i].Frequency || Math.Abs(live[i].GainTenths - mine[i].GainTenths) > 1) return false;
+        return true;
+    }
+
+    static EqBand[] StandardBands()
+    {
+        var bands = new EqBand[StandardFreqs.Length];
+        for (int i = 0; i < bands.Length; i++)
+            bands[i] = new EqBand { Frequency = StandardFreqs[i], Filter = 1, QThousandths = 1414 };
+        return bands;
+    }
+
+    class EqGraph : Control
+    {
+        EqBand[] bands = new EqBand[0];
+        int hot = -1, drag = -1;
+        public event EventHandler Edited;
+        public EqBand[] Bands { get { return bands; } }
+
+        public EqGraph()
+        {
+            DoubleBuffered = true;
+            BackColor = Color.FromArgb(22, 22, 26);
+            Cursor = Cursors.Hand;
+        }
+
+        public void SetBands(EqBand[] next)
+        {
+            bands = next ?? new EqBand[0];
+            Invalidate();
+        }
+
+        RectangleF Plot()
+        {
+            return new RectangleF(48, 18, Math.Max(10, Width - 72), Math.Max(10, Height - 48));
+        }
+
+        float X(int i, RectangleF plot)
+        {
+            if (bands.Length <= 1) return plot.Left;
+            return plot.Left + plot.Width * i / (bands.Length - 1);
+        }
+
+        float Y(int tenths, RectangleF plot)
+        {
+            tenths = Math.Max(-120, Math.Min(120, tenths));
+            return plot.Top + plot.Height * (120 - tenths) / 240f;
+        }
+
+        int Hit(Point p)
+        {
+            var plot = Plot();
+            for (int i = 0; i < bands.Length; i++)
+            {
+                float dx = p.X - X(i, plot), dy = p.Y - Y(bands[i].GainTenths, plot);
+                if (dx * dx + dy * dy <= 16 * 16) return i;
+            }
+            return -1;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            drag = Hit(e.Location);
+            if (drag >= 0) { hot = drag; UpdateGain(e.Y); }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (drag >= 0) UpdateGain(e.Y);
+            else
+            {
+                int next = Hit(e.Location);
+                if (next != hot) { hot = next; Invalidate(); }
+            }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            drag = -1;
+            base.OnMouseUp(e);
+        }
+
+        void UpdateGain(int y)
+        {
+            var plot = Plot();
+            float t = (y - plot.Top) / plot.Height;
+            int tenths = (int)Math.Round(120 - t * 240);
+            tenths = Math.Max(-120, Math.Min(120, tenths));
+            if (bands[drag].GainTenths == tenths) return;
+            bands[drag].GainTenths = tenths;
+            if (Edited != null) Edited(this, EventArgs.Empty);
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            var plot = Plot();
+            using (var fill = new SolidBrush(Color.FromArgb(32, 32, 38)))
+                g.FillRectangle(fill, plot);
+            using (var grid = new Pen(Color.FromArgb(38, 255, 255, 255)))
+            using (var zero = new Pen(Color.FromArgb(90, 255, 255, 255)))
+            using (var font = new Font("Segoe UI", 8f))
+            using (var muted = new SolidBrush(Color.FromArgb(140, 140, 148)))
+            {
+                for (int db = -12; db <= 12; db += 6)
+                {
+                    float y = Y(db * 10, plot);
+                    g.DrawLine(db == 0 ? zero : grid, plot.Left, y, plot.Right, y);
+                    string label = db > 0 ? "+" + db : db.ToString();
+                    g.DrawString(label, font, muted, 8, y - 7);
+                }
+                if (bands.Length == 0) return;
+                var points = new PointF[bands.Length];
+                for (int i = 0; i < bands.Length; i++) points[i] = new PointF(X(i, plot), Y(bands[i].GainTenths, plot));
+                using (var area = new GraphicsPath())
+                {
+                    area.AddLine(points[0].X, Y(0, plot), points[0].X, points[0].Y);
+                    area.AddLines(points);
+                    area.AddLine(points[points.Length - 1].X, points[points.Length - 1].Y, points[points.Length - 1].X, Y(0, plot));
+                    area.CloseFigure();
+                    using (var brush = new SolidBrush(Color.FromArgb(56, 70, 200, 110))) g.FillPath(brush, area);
+                }
+                using (var pen = new Pen(Color.FromArgb(70, 200, 110), 2.2f)) g.DrawLines(pen, points);
+                for (int i = 0; i < bands.Length; i++)
+                {
+                    bool on = i == hot || i == drag;
+                    float r = on ? 7f : 5f;
+                    var c = points[i];
+                    using (var brush = new SolidBrush(on ? Color.White : Color.FromArgb(70, 200, 110)))
+                        g.FillEllipse(brush, c.X - r, c.Y - r, r * 2, r * 2);
+                    var freq = FreqLabel(bands[i].Frequency);
+                    var size = g.MeasureString(freq, font);
+                    g.DrawString(freq, font, muted, c.X - size.Width / 2, plot.Bottom + 6);
+                }
+                int show = drag >= 0 ? drag : hot;
+                if (show >= 0)
+                {
+                    string tip = FreqLabel(bands[show].Frequency) + "   " + EqBand.Db(bands[show].GainTenths);
+                    var size = g.MeasureString(tip, Font);
+                    float x = Math.Min(points[show].X + 12, plot.Right - size.Width - 8);
+                    float y = Math.Max(plot.Top + 4, points[show].Y - 26);
+                    var box = new RectangleF(x - 6, y - 2, size.Width + 12, size.Height + 4);
+                    using (var brush = new SolidBrush(Color.FromArgb(230, 18, 18, 22))) g.FillRectangle(brush, box);
+                    g.DrawString(tip, Font, Brushes.White, x, y);
+                }
+            }
+        }
+
+        static string FreqLabel(int hz)
+        {
+            if (hz >= 1000) return (hz / 1000.0).ToString(hz % 1000 == 0 ? "0" : "0.#", System.Globalization.CultureInfo.InvariantCulture) + "k";
+            return hz.ToString();
+        }
     }
 }
 
@@ -1052,6 +1403,42 @@ class EqSnapshot
         for (int i = 0; i < 10; i++) gains[i] = (sbyte)buf[start + i];
         return gains;
     }
+
+    public static byte[] BuildWirelessSlot(EqBand[] bands, string name, int length)
+    {
+        if (length < 140) length = 1036;
+        var msg = new byte[length];
+        msg[0] = 0x01;
+        msg[1] = 0x1B;
+        msg[2] = 4;
+        WriteAscii(msg, 3, 6, name);
+        WriteAscii(msg, 9, 61, name);
+        var ordered = (bands ?? new EqBand[0]).OrderBy(b => b.Frequency).Take(10).ToArray();
+        for (int i = 0; i < ordered.Length; i++)
+        {
+            var band = ordered[i];
+            int freq = Math.Max(20, Math.Min(20000, band.Frequency));
+            int gain = Math.Max(-120, Math.Min(120, band.GainTenths));
+            int q = band.QThousandths <= 0 ? 1414 : Math.Max(200, Math.Min(10000, band.QThousandths));
+            int type = band.Filter >= 1 && band.Filter <= 5 ? band.Filter : 1;
+            int d = 70 + i * 6;
+            msg[d] = (byte)freq;
+            msg[d + 1] = (byte)(freq >> 8);
+            msg[d + 2] = (byte)type;
+            msg[d + 3] = unchecked((byte)gain);
+            msg[d + 4] = (byte)q;
+            msg[d + 5] = (byte)(q >> 8);
+        }
+        return msg;
+    }
+
+    static void WriteAscii(byte[] buf, int at, int len, string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        var bytes = System.Text.Encoding.ASCII.GetBytes(text);
+        for (int i = 0; i < len && i < bytes.Length; i++)
+            if (bytes[i] >= 32 && bytes[i] < 127) buf[at + i] = bytes[i];
+    }
 }
 
 enum DialProtocol { Arctis7Plus, NovaElite }
@@ -1080,6 +1467,8 @@ class ArctisHid
     volatile bool deviceLost, requestStatus, stopping, rearmChatMix, wantEq;
     volatile string eliteCommandPath;
     int eliteOutLen = 64;
+    int featureLength = 1036;
+    byte[] pendingEq;
     DialProtocol protocol;
     HeadsetStatus lastStatus;
     int lastGame = -1, lastChat = -1;
@@ -1101,6 +1490,11 @@ class ArctisHid
     }
 
     public void RequestEq() { wantEq = true; }
+
+    public void WriteWirelessEq(EqBand[] bands, string name)
+    {
+        lock (statusLock) pendingEq = EqSnapshot.BuildWirelessSlot(bands, name, featureLength);
+    }
 
     public void Shutdown()
     {
@@ -1160,6 +1554,7 @@ class ArctisHid
             commandReportIn = commandIn;
             eventReportIn = eventIn;
             featureLen = feature;
+            featureLength = feature;
             break;
         }
         if (statusPath == null) return;
@@ -1204,6 +1599,7 @@ class ArctisHid
                         writer.Write(EliteCommand(reportLength, 0x49, 0x01), 0, reportLength);
                     }
                     if (protocol == DialProtocol.NovaElite) DrainOutbound(writer, reportLength);
+                    if (protocol == DialProtocol.NovaElite) WritePendingEq(statusPath);
                     if (wantEq && protocol == DialProtocol.NovaElite)
                     {
                         wantEq = false;
@@ -1443,6 +1839,19 @@ class ArctisHid
     {
         ui.Post(_ => { if (EqChanged != null) EqChanged(snapshot); }, null);
     }
+
+    void WritePendingEq(string path)
+    {
+        byte[] msg;
+        lock (statusLock) { msg = pendingEq; pendingEq = null; }
+        if (msg == null) return;
+        try
+        {
+            Hid.SetFeature(path, msg);
+            wantEq = true;
+        }
+        catch (Exception) { }
+    }
 }
 
 static class Hid
@@ -1526,8 +1935,19 @@ static class Hid
         }
     }
 
+    public static void SetFeature(string path, byte[] buf)
+    {
+        if (buf == null || buf.Length < 16) throw new IOException("Bad EQ report");
+        using (var h = CreateFile(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero))
+        {
+            if (h.IsInvalid) throw new IOException("Cannot open " + path);
+            if (!HidD_SetFeature(h, buf, buf.Length)) throw new IOException("EQ write failed");
+        }
+    }
+
     [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid guid);
     [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buf, int length);
+    [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buf, int length);
     [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr data);
     [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr data);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr data, out HIDP_CAPS caps);
